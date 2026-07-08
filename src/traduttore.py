@@ -57,6 +57,28 @@ PROMPT_TEMPLATE = (
 # Budget approssimativo di caratteri per blocco, per non saturare il contesto.
 MAX_CHAR_BLOCCO = 1200
 
+# --------------------------------------------------------------------------- #
+# Speculative decoding (accelerazione della generazione)
+# --------------------------------------------------------------------------- #
+# Modalita' scelta via env SPEC_DECODING:
+#   "off" (DEFAULT): generazione normale, token per token. E' il piu' veloce per
+#            la traduzione CROSS-LINGUA: misurato ~2.5x piu' rapido di "lookup"
+#            (EN->IT), perche' tra input e output tradotto non ci sono n-gram
+#            comuni e il lookup finisce per speculare a vuoto (costo puro).
+#   "lookup": prompt-lookup decoding. Nessun modello aggiuntivo, ZERO VRAM extra.
+#            Conviene SOLO quando l'output ricalca molto l'input (stessa lingua,
+#            o molto testo copiato verbatim), NON nella traduzione tra lingue.
+#   "draft":  assisted generation con un draft model piu' piccolo della STESSA
+#            famiglia (Gemma 4 E2B). E' l'approccio giusto per la traduzione (il
+#            draft "parla italiano" e propone token plausibili), ma tiene DUE
+#            modelli in VRAM: su una GPU da 8 GB e' al limite (rischio CUDA OOM).
+SPEC_MODE = os.environ.get("SPEC_DECODING", "off").strip().lower()
+# Draft model per la modalita' "draft": deve condividere il tokenizer del target
+# (stessa famiglia). Override con GEMMA_DRAFT_MODEL_PATH per una copia locale.
+DRAFT_MODEL_ID = os.environ.get("GEMMA_DRAFT_MODEL_PATH", "google/gemma-4-E2B-it")
+# Quanti token "indovinare" dall'input a ogni passo, in modalita' lookup.
+PROMPT_LOOKUP_TOKENS = 10
+
 
 def log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
@@ -202,7 +224,52 @@ def carica_modello():
         sys.exit(1)
 
 
-def traduci_blocco(tokenizer, model, prompt: str, blocco: str) -> str:
+def carica_draft_model():
+    """Carica il draft model (Gemma 4 E2B, 4-bit su GPU) per l'assisted generation.
+
+    Serve solo in modalita' SPEC_DECODING=draft e solo con CUDA. In caso di
+    errore (modello assente, VRAM insufficiente) NON blocca la pipeline: ritorna
+    None e la generazione prosegue senza draft.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+
+    quant = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    comuni = dict(cache_dir=CACHE_DIR, quantization_config=quant, dtype=torch.bfloat16)
+    for local_only in (True, False):  # prima la cache, poi (una volta) il download
+        try:
+            log(f"Carico il draft model {DRAFT_MODEL_ID} (4-bit su GPU)...")
+            return AutoModelForCausalLM.from_pretrained(
+                DRAFT_MODEL_ID, device_map={"": 0}, local_files_only=local_only, **comuni
+            )
+        except Exception as e:  # noqa: BLE001 — degradiamo, non blocchiamo
+            if local_only:
+                continue  # non in cache: riprovo scaricando
+            log(f"Draft model non caricato ({e}); proseguo senza assisted generation.")
+            return None
+
+
+def costruisci_gen_kwargs(draft_model) -> dict:
+    """Parametri per generate() in base alla modalita' di speculative decoding."""
+    kw = dict(max_new_tokens=2048, do_sample=False)
+    if SPEC_MODE == "lookup":
+        # Prompt-lookup decoding: zero VRAM extra, nessun modello aggiuntivo.
+        kw["prompt_lookup_num_tokens"] = PROMPT_LOOKUP_TOKENS
+        log(f"Speculative decoding: prompt-lookup ({PROMPT_LOOKUP_TOKENS} token).")
+    elif SPEC_MODE == "draft" and draft_model is not None:
+        kw["assistant_model"] = draft_model
+        log("Speculative decoding: assisted generation con draft model.")
+    else:
+        log("Speculative decoding: disattivato (generazione standard).")
+    return kw
+
+
+def traduci_blocco(tokenizer, model, prompt: str, blocco: str, gen_kwargs: dict) -> str:
     import torch
 
     messaggi = [{"role": "user", "content": f"{prompt}\n\nDocumento:\n{blocco}"}]
@@ -217,11 +284,7 @@ def traduci_blocco(tokenizer, model, prompt: str, blocco: str) -> str:
 
     input_len = inputs["input_ids"].shape[1]
     with torch.no_grad():
-        output = model.generate(
-            **inputs,
-            max_new_tokens=2048,
-            do_sample=False,
-        )
+        output = model.generate(**inputs, **gen_kwargs)
     # Decodifica solo i token generati, escludendo il prompt in input.
     testo = tokenizer.decode(output[0][input_len:], skip_special_tokens=True)
     return testo.strip()
@@ -261,10 +324,21 @@ def main() -> None:
 
     tokenizer, model = carica_modello()
 
+    # Draft model solo se richiesto esplicitamente e con CUDA (su CPU non conviene).
+    draft_model = None
+    if SPEC_MODE == "draft":
+        import torch
+
+        if torch.cuda.is_available():
+            draft_model = carica_draft_model()
+        else:
+            log("Modalita' draft ignorata: senza GPU non porta vantaggi.")
+    gen_kwargs = costruisci_gen_kwargs(draft_model)
+
     tradotti = []
     for i, blocco in enumerate(blocchi, 1):
         log(f"Traduco blocco {i}/{len(blocchi)}...")
-        tradotti.append(traduci_blocco(tokenizer, model, prompt, blocco))
+        tradotti.append(traduci_blocco(tokenizer, model, prompt, blocco, gen_kwargs))
     corpo_tradotto = "\n\n".join(tradotti)
 
     percorso_out = percorso_output(args.file)
