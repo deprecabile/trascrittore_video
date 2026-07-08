@@ -1,0 +1,31 @@
+[project]
+name = "trascrittore-youtube"
+version = "0.1.0"
+description = "Trascrizione di video YouTube tramite Google Gemini"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "google-genai",
+    "python-dotenv>=1.2.2",
+    "yt-dlp",
+    # Pipeline locale di rilevamento lingua + traduzione (PyTorch)
+    "torch>=2.11.0",
+    "transformers>=4.51",
+    "accelerate",
+    "sentencepiece",
+    "protobuf",
+    # Quantizzazione 4-bit su GPU (usata solo se CUDA e' disponibile)
+    "bitsandbytes",
+]
+
+# torch dalla build CUDA cu128: cu124 non pubblica wheel per Python 3.14, la CPU-only
+# lascerebbe inutilizzata la GPU. `uv sync` prende la build giusta in modo dichiarativo,
+# senza passi pip manuali con --index-url. L'indice e' "explicit": usato solo dai
+# pacchetti che lo referenziano qui sotto.
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

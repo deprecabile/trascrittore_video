@@ -1,0 +1,46 @@
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Environment Variables / Secrets
+.env
+.env.*
+*.secret
+# ...ma il template SENZA valori reali va versionato (eccezione alla riga sopra)
+!.env.example
+
+# Cache and temporary files
+.cache/
+# File audio temporaneo prodotto durante la trascrizione (di solito auto-rimosso,
+# ma potrebbe restare se una run va in crash)
+audio_temp.*
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Output and build directories
+out/
+build/
+dist/
+*.egg-info/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE / Editor / AI Tooling
+.claude/
+.idea/
+.vscode/
+*.swp
+*.swo
