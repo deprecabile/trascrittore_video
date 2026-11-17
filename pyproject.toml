@@ -3,11 +3,12 @@ name = "trascrittore-youtube"
 version = "0.1.0"
 description = "Trascrizione di video YouTube tramite Google Gemini"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "google-genai",
+    "google-genai>=3.4.0",
     "python-dotenv>=1.2.2",
-    "yt-dlp",
+    # Include yt-dlp-ejs, necessario con Node per i challenge JavaScript di YouTube.
+    "yt-dlp[default]",
     # Pipeline locale di rilevamento lingua + traduzione (PyTorch)
     "torch>=2.11.0",
     "transformers>=4.51",

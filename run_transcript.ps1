@@ -1,6 +1,9 @@
 param (
-    [Parameter(Mandatory=$true, HelpMessage="Inserisci l'URL del video di YouTube")]
+    [Parameter(Mandatory=$true, Position=0, HelpMessage="Inserisci l'URL del video di YouTube")]
     [string]$Url,
+
+    [Parameter(Position=1)]
+    [string]$Name,
 
     [switch]$f
 )
@@ -8,10 +11,27 @@ param (
 $ErrorActionPreference = "Stop"
 
 # --- Risoluzione dell'eseguibile Python del venv ---
-$pythonExe = ".\.venv\Scripts\python.exe"
+$pythonExe = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (-Not (Test-Path $pythonExe)) {
     Write-Error "Ambiente virtuale non trovato in .\.venv. Esegui prima 'uv sync'."
     exit 1
+}
+
+# Python e PowerShell devono usare la stessa codifica per i canali rediretti.
+# Ripristina la codifica del terminale anche se lo step fallisce.
+function Invoke-PythonStep {
+    param([string]$Step, [string[]]$Arguments)
+    $codificaPrecedente = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $righe = & $pythonExe -X utf8 @Arguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "${Step}: processo Python terminato con codice $LASTEXITCODE. Vedi l'errore precedente."
+        }
+        return $righe
+    } finally {
+        [Console]::OutputEncoding = $codificaPrecedente
+    }
 }
 
 # Estrae il valore di "OUTPUT_FILE=..." dalle righe stdout di uno script.
@@ -26,11 +46,10 @@ function Get-OutputFile {
 # STEP 1 — Trascrizione con Gemini
 # ==========================================================================
 Write-Host "`n[1/3] Trascrizione con Gemini..." -ForegroundColor Cyan
-if ($f) {
-    $out1 = & $pythonExe src\trascrittore_gemini.py $Url --f
-} else {
-    $out1 = & $pythonExe src\trascrittore_gemini.py $Url
-}
+$argomenti = @((Join-Path $PSScriptRoot "src\trascrittore_gemini.py"), $Url)
+if ($Name) { $argomenti += @("--name", $Name) }
+if ($f)    { $argomenti += "--f" }
+$out1 = Invoke-PythonStep -Step "Trascrizione fallita" -Arguments $argomenti
 $out1 | ForEach-Object { Write-Host $_ }
 
 $fileTrascrizione = Get-OutputFile -Lines $out1
@@ -44,7 +63,9 @@ Write-Host "File di trascrizione: $fileTrascrizione" -ForegroundColor DarkGray
 # STEP 2 — Rilevamento della lingua (modello locale PyTorch)
 # ==========================================================================
 Write-Host "`n[2/3] Rilevamento della lingua..." -ForegroundColor Cyan
-$out2 = & $pythonExe src\lang_detector.py $fileTrascrizione
+$out2 = Invoke-PythonStep -Step "Rilevamento lingua fallito" -Arguments @(
+    (Join-Path $PSScriptRoot "src\lang_detector.py"), $fileTrascrizione
+)
 $lang = ($out2 | Where-Object { $_ -match '^[A-Za-z]{3}$' } | Select-Object -Last 1)
 if (-Not $lang) {
     Write-Error "Rilevamento lingua fallito: nessun codice restituito."
@@ -64,7 +85,9 @@ if ($lang -eq "ITA") {
 
 # traduttore.py gestisce entrambi i casi: se la lingua e' ITA copia il file,
 # altrimenti traduce con Gemma. In ogni caso produce OUTPUT_FILE=<path>.
-$out3 = & $pythonExe src\traduttore.py $fileTrascrizione $lang
+$out3 = Invoke-PythonStep -Step "Produzione della versione italiana fallita" -Arguments @(
+    (Join-Path $PSScriptRoot "src\traduttore.py"), $fileTrascrizione, $lang
+)
 $out3 | ForEach-Object { Write-Host $_ }
 
 $fileFinale = Get-OutputFile -Lines $out3

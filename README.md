@@ -8,7 +8,7 @@ Pipeline che, dato l'URL di un video di YouTube, ne produce la **trascrizione in
 
 Il progetto automatizza in tre passi il percorso "video → testo leggibile in italiano":
 
-1. **Trascrizione** — scarica l'audio del video e lo trascrive con **Google Gemini** (`gemini-2.5-flash`), producendo un Markdown pulito (paragrafi, grassetti sui concetti chiave).
+1. **Trascrizione** — scarica l'audio del video e lo trascrive nella lingua originale con **Gemini 3.5 Transcribe** (`gemini-3.5-transcribe`), in modalità `smart`: pulizia delle esitazioni e formattazione del testo, salvato in Markdown.
 2. **Rilevamento lingua** — riconosce la lingua della trascrizione con un modello **locale** (nessuna chiamata esterna).
 3. **Traduzione** — se la lingua non è l'italiano, traduce il documento con un modello **locale** (**Gemma 4** di Google), preservando la formattazione Markdown.
 
@@ -59,8 +59,8 @@ Sono accettati tutti i formati di URL YouTube (`watch?v=`, `youtu.be/`, `/embed/
 ### Prerequisiti di sistema
 
 - **[uv](https://docs.astral.sh/uv/)** — gestore di ambiente e pacchetti Python (scarica anche la versione di Python giusta).
-- **[ffmpeg](https://ffmpeg.org/)** — usato per estrarre l'audio dal video (dev'essere nel `PATH`).
-- **[Node.js](https://nodejs.org/)** — richiesto da yt-dlp per risolvere i controlli JavaScript di YouTube.
+- **[ffmpeg e ffprobe](https://ffmpeg.org/)** — usati per estrarre l'audio, verificarne la durata e dividerlo in blocchi (devono essere nel `PATH`).
+- **[Node.js](https://nodejs.org/)** (22 o successivo, nel `PATH`) — richiesto da yt-dlp per risolvere i controlli JavaScript di YouTube. Gli script complementari `yt-dlp-ejs` vengono installati da `uv sync` tramite la dipendenza `yt-dlp[default]`.
 - **GPU NVIDIA** (consigliata) — per far girare la traduzione in modo veloce. Senza GPU funziona comunque su CPU, ma è molto più lento (serve parecchia RAM).
 
 ### 1. Installa le dipendenze Python
@@ -72,6 +72,8 @@ uv sync
 ```
 
 `uv` crea l'ambiente virtuale `.venv/` e installa tutto quanto dichiarato in `pyproject.toml`. La build CUDA di PyTorch (indice `cu128`) è già configurata in modo dichiarativo: **non serve installare torch a mano**.
+
+L'SDK Google richiede Python 3.11 o successivo; il venv del progetto usa Python 3.14.
 
 Verifica che la GPU sia vista:
 
@@ -97,13 +99,63 @@ La chiave si ottiene da [Google AI Studio](https://aistudio.google.com/apikey). 
 .\run_transcript.ps1 -Url "https://www.youtube.com/watch?v=XXXXXXXXXXX"
 ```
 
+### Se YouTube restituisce HTTP 403
+
+L'errore avviene durante il download, prima della chiamata a Gemini. Lo script
+rigenera gli URL senza cache e riprova una sola volta in caso di 403.
+Se fallisce ancora, aggiorna yt-dlp e gli script JavaScript insieme (con le loro
+dipendenze), senza richiedere l'aggiornamento dei modelli locali:
+
+```powershell
+uv sync --upgrade-package yt-dlp --upgrade-package yt-dlp-ejs
+node --version
+```
+
+Poi ripeti il comando di trascrizione. Installare solo `yt-dlp` senza l'extra
+`[default]` non installa gli script EJS, anche se Node è già presente.
+Vedi la [guida ufficiale EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+
+Se il 403 persiste, puoi verificare il solo download di un piccolo campione,
+senza chiamare Gemini:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m yt_dlp --ignore-config --js-runtimes node --no-playlist --test -f "bestaudio/best" -o ".cache/download-check/%(id)s.%(ext)s" "<url>"
+```
+
+### Trascrizione con Gemini 3.5 Transcribe
+
+La trascrizione usa la **Interactions API** e la modalità `smart`, con rilevamento
+automatico della lingua. La traduzione in italiano rimane affidata allo stadio
+locale Gemma. Non viene inviato un prompt di traduzione o di riassunto a Transcribe;
+la formattazione è quella della modalità `smart`, senza l'istruzione aggiuntiva
+del vecchio prompt per evidenziare i concetti chiave in grassetto.
+
+Gli audio oltre 30 minuti vengono divisi con ffmpeg e trascritti in ordine, poi
+riuniti in un unico Markdown. Questo evita il troncamento silenzioso previsto
+dall'API per audio oltre il suo limite. I tagli avvengono ai confini dei frame MP3,
+quindi una frase può attraversare due blocchi. File temporanei e upload vengono
+rimossi anche in caso di errore; le interazioni usano `store=False`.
+Vedi la [guida ufficiale Transcribe](https://aistudio.google.com/docs/transcribe).
+
+Un errore **503 UNAVAILABLE** indica indisponibilità temporanea, non dimostra
+che il modello sia stato disabilitato. L'SDK è configurato per un massimo di
+4 tentativi con attese crescenti per errori transitori (408, 429, 500, 502, 503,
+504). Gli altri errori, ad esempio una chiave non valida, interrompono il processo.
+Una risposta incompleta o vuota non viene salvata come trascrizione riuscita.
+
+Verifica locale della trascrizione e della gestione dei blocchi (senza chiamate API):
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
 ---
 
 ## Struttura dei modelli usati
 
 | Passo | Modello | Dove gira |
 |---|---|---|
-| Trascrizione | `gemini-2.5-flash` (Google) | Cloud (API) |
+| Trascrizione | `gemini-3.5-transcribe`, modalità `smart` (Google) | Cloud (Interactions API) |
 | Rilevamento lingua | `papluca/xlm-roberta-base-language-detection` | Locale (PyTorch) |
 | Traduzione | `google/gemma-4-E4B-it` (Apache 2.0) | Locale (PyTorch, 4-bit su GPU) |
 
